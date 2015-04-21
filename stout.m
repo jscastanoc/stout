@@ -16,12 +16,14 @@ function [J_rec extras] = stout(y,L,B,varargin)
 %   Output:
 %         J_rec -> 3NdxNt. Reconstructed activity (solution)
 %
-% Comments:
-%
-% Juan S. Castano C.
-% jscastanoc@gmail.com
+% Sebastian Castano-Candamil
+% sebastian.castano@blbt.uni-freiburg.de
 % 14 Aug 2013
-
+%
+% Comments:
+% Based on the Implementation ofund in mne-python (include tf-transform)
+% https://github.com/mne-tools/mne-python
+%
 Ndor = size(L,2);
 idx = 1:1:Ndor;
 L_or = L;
@@ -32,13 +34,13 @@ Nt = size(y,2);
 p = inputParser;
 
 def_a = 4;
-def_m = 64;
+def_m = 80;
 def_sreg = 90;
 def_treg= 30;
 def_maxiter = 500;
-def_tol = 1e-4;
+def_tol = 1e-3;
 def_lipschitz = [];
-def_optimres = false;
+def_optimres = true;
 def_Winv = [];
 
 addParamValue(p,'tstep',def_a);
@@ -69,9 +71,9 @@ for i = 1:3
     L(:,:,i) = Ltemp(:,:,i)*B;
 end
 L = translf(L);
-c = dgtreal(y','sine',a,M);
-T = size(c,2);
-K = size(c,1);
+c = stft(y,M,a);
+T = size(c,3);
+K = size(c,2);
 Z = sparse(0,K*T);
 Y = sparse(Nd,K*T);
 J_rec = sparse(Nd,Nt);
@@ -81,8 +83,8 @@ tempGY = L'*y;
 aux = sum(reshape(tempGY.^2',[],Nd/3)',2);
 basepar = 0.01*sqrt(max(aux(:)));
 L = L/basepar;
-L_or = L_or;
 clear tempGY;
+
 R = y;
 active_set = logical(sparse(1,Nd));
 Y_time_as = [];
@@ -97,7 +99,7 @@ stop =false;
 fprintf('Running FISTA algorithm... \n');
 eta = 0;
 rescum = [];
-temp =  reshape(full(Z)',K,T,[]);
+% temp =  reshape(full(Z)',K,T,[]);
 error = inf;
 res_0 = inf;
 nn = 1;
@@ -115,8 +117,9 @@ while true
         tic;
         Z_0 = Z;
         active_set0 = active_set;
-        temp = dgtreal(R','gauss',a,M);
-        temp = permute(temp,[3 1 2]);
+        %temp = dgtreal(R','gauss',a,M);
+        temp = stft(R,M,a);
+        %temp = permute(temp,[3 1 2]);
         temp = reshape(temp,Nc,[]);
         
         Y = Y + L'*temp/lipschitz_k;
@@ -142,13 +145,20 @@ while true
             Y(find(active_set),:) = (1 + dt)*Z;
             Y(find(active_set0),:)= Y(find(active_set0),:) - dt*Z_0;
             Y_as = active_set0 | active_set;
-            temp = full(Y(find(Y_as),:));
-            temp =  reshape(temp',K,T,[]);
-            temp = flipdim(temp,2);
-            temp = flipud(idgtreal(temp,'gauss',a,M))';
-            Y_time_as = sparse(Nd,size(temp,2));
-            Y_time_as(find(Y_as),:) = temp;
-            R = y - L(:, find(Y_as))*Y_time_as(find(Y_as),1:Nt);
+            %temp = full(Y(find(Y_as),:));
+            %temp =  reshape(temp',K,T,[]);
+            %             temp = flipdim(temp,2);
+            %             temp = flipud(istft(temp,M,a));
+            act_Y_as = find(Y_as);
+            temp = reshape(full(Y(act_Y_as,:)), length(act_Y_as),K,T);
+            temp = istft(temp,a,Nt);
+            if isempty(Y_time_as)
+                R = y;
+            else
+                Y_time_as = sparse(Nd,size(temp,2));
+                Y_time_as(find(Y_as),:) = temp;
+                R = y - L(:, find(Y_as))*Y_time_as(find(Y_as),1:Nt);
+            end
         else
             disp('')
         end
@@ -161,16 +171,24 @@ while true
     end
     fprintf(' Done!... \nTransforming solution to the time domain: \n%d non-zero time series \n'...
         , sum(full(active_set)))
-    temp =  reshape(full(Z)',K,T,[]);
-    temp = flipdim(temp,2);
-    temp = flipud(idgtreal(temp,'gauss',a,M))';
-    J_recf = sparse(Nd,size(temp,2));
-    J_recf(find(active_set),:) = temp;
-    J_recf = J_recf(:,1:Nt);
-    Jf = zeros(Ndor,Nt);
-    Jf(idx,:) = J_recf;
-    Jf = Jf*norm(y,2)/norm(L_or*Jf,2);
-    term_rec = L_or*Jf;
+    %temp =  reshape(full(Z)',K,T,[]);
+    %     temp = flipdim(temp,2);
+    %     temp = flipud(istft(temp,a,Nt));
+    temp = reshape(full(Z),[],K,T);
+    temp = istft(temp,a,Nt);
+    
+    if ~isempty(temp)
+        J_recf = sparse(Nd,size(temp,2));
+        J_recf(find(active_set),:) = temp;
+        J_recf = J_recf(:,1:Nt);
+        Jf = zeros(Ndor,Nt);
+        Jf(idx,:) = J_recf;
+        Jf = Jf*norm(y,2)/norm(L_or*Jf,2);
+        term_rec = L_or*Jf;
+    else
+        term_rec = NaN;
+        Jf = [];
+    end
     term_or = y;
     resnorm = norm(term_rec-term_or, 'fro');
     fprintf('RESNORM = %8.3e MAX:%1.3e\n',resnorm,avg_res);
@@ -204,7 +222,7 @@ end
 function [Y active_set] = prox_l21(Y,mu,n_orient)
 n_pos = size(Y,1)/n_orient;
 rows_norm = sqrt(sum(reshape(abs(Y).^2',[],n_pos)',2));
-shrink = max(0.1 - mu./max(rows_norm,mu),0);
+shrink = max(1 - mu./max(rows_norm,mu),0);
 active_set = (shrink > 0);
 shrink = shrink(active_set);
 if n_orient>1
@@ -220,7 +238,7 @@ end
 function [Y active_set] = prox_l1(Y,lambda,n_orient)
 n_pos = size(Y,1)/n_orient;
 norms = sqrt(sum(reshape((abs(Y).^2),n_orient,[]),1));
-shrink = max(0.1-lambda./max(norms,lambda),0);
+shrink = max(1-lambda./max(norms,lambda),0);
 shrink = reshape(shrink',n_pos,[]);
 active_set = logical(sum(shrink,2));
 shrink = shrink(find(active_set),:);
@@ -239,9 +257,9 @@ function k = lipschitz_contant(y, L, tol, a, M)
 Nt = size(y,2);
 Nd = size(L,2);
 iv = ones(Nd,Nt);
-v = dgtreal(iv', 'sine', a,M);
-T = size(v,2);
-K = size(v,1);
+v = stft(iv,M,a);
+T = size(v,3);
+K = size(v,2);
 l = 1e100;
 l_old = 0;
 fprintf('Lipschitz constant estimation: \n')
@@ -253,11 +271,11 @@ for i = 1 : 100
     fprintf([rev_line, msg]);
     rev_line = repmat(sprintf('\b'),1,length(msg));
     l_old = l;
-    aux = idgtreal(v,'sine',a,M)';
+    aux = istft(v,a,Nt);
     iv = real(aux);
     Lv = L*iv;
     LtLv = L'*Lv;
-    w = dgtreal(LtLv', 'sine', a,M);
+    w = stft(LtLv, M,a);
     l = max(max(max(abs(w))));
     v = w/l;
     if abs(l-l_old)/l_old < tol
@@ -274,15 +292,15 @@ Nd = size(L,2);
 Q = speye(Nd);
 inv_Lap = Q;
 avg_res = 0;
-for i = 1:15
+for i = 1:10
     rand_idx = randperm(size(L,1));
-    idx_tr = rand_idx(1:round(size(L,1)*0.6));
-    idx_te = rand_idx(round(size(L,1)*0.6)+1:end);
+    idx_tr = rand_idx(1:round(size(L,1)*0.5));
+    idx_te = rand_idx(round(size(L,1)*0.5)+1:end);
     eye_Nc = speye(length(idx_tr));
     iLAP_LT = inv_Lap*L(idx_tr,:)';
     gcv_fun = @(alpha) gcv(y(idx_tr,:),L(idx_tr,:),alpha, inv_Lap, iLAP_LT, eye_Nc);
     optionsopt = optimset('tolX',1e-6);
-    alpha = fminsearch(gcv_fun, 1e-1,optionsopt);
+    alpha = fminsearch(gcv_fun, 1,optionsopt);
     invT = iLAP_LT/(L(idx_tr,:)*iLAP_LT+abs(alpha)*eye_Nc);
     J_rec = invT*y(idx_tr,:);
     if ~isempty(Winv)
@@ -291,7 +309,8 @@ for i = 1:15
         J_rec = permute(reshape(full(reshape(permute(J_est, [1 3 2]), siJ(1), [])*Winv), siJ(1), siJ(3), siJ(2)), [1 3 2]);
         J_rec = translf(J_rec)';
     end
-    avg_res = avg_res + norm(y(idx_te,:)-L(idx_te,:)*J_rec,'fro')/10;
+    J_rec = J_rec*norm(y(idx_te,:),2)/norm(L(idx_te,:)*J_rec,2);
+    avg_res = avg_res + norm(y(idx_te,:)-L(idx_te,:)*J_rec,'fro');
 end
 end
 
@@ -301,3 +320,78 @@ x_est = T*y;
 A = norm(L*x_est - y,2);
 gcv_val = sum(diag(A*A'))/trace((eye_Nc-L*T))^2;
 end
+
+function [ X] = stft(x, wsize, tstep)
+%UNTITLED Summary of this function goes here
+%   Detailed explanation goes here
+if isempty(x)
+    X = [];
+    return
+end
+
+[Nc, Nt] = size(x);
+n_step = ceil(Nt/tstep);
+n_freq = wsize/2 + 1;
+X = zeros(Nc,n_freq, n_step);
+
+twin = [0.5:wsize+0.5-1];
+win = sin(twin/wsize*pi);
+win2 = win.^2;
+
+swin = zeros(1,(n_step - 1)*tstep + wsize);
+for t = 1:n_step
+    swin((t-1)*tstep+1:(t-1)*tstep + wsize) = swin((t-1)*tstep+1:(t-1)*tstep + wsize) + win2;
+end
+swin = sqrt(wsize*swin);
+
+xp = zeros([Nc, wsize + (n_step-1)*tstep]);
+xp(:,(wsize-tstep)/2+1:(wsize-tstep)/2 + Nt) = x;
+x = xp;
+
+for t = 1:n_step
+    wwin = win./swin((t-1)*tstep+1:(t-1)*tstep+wsize);
+    wwin = repmat(wwin,Nc,1);
+    frame = x(:, (t-1)*tstep+1:(t-1)*tstep+wsize).*wwin;
+    fframe = fft(frame,[],2);
+    X(:,:,t) = fframe(:,1:n_freq);
+end
+
+
+end
+
+
+function [x] = istft(X, tstep, Tx)
+
+if isempty(X)
+    x = [];
+    return
+end
+[Nc, n_win, n_step] = size(X);
+
+wsize = 2*(n_win-1);
+Nt = n_step * tstep;
+x = zeros([Nc, Nt+wsize-tstep]);
+
+twin = [0.5:wsize+0.5-1];
+win = sin(twin/wsize*pi);
+win2 = win.^2;
+
+swin = zeros(1,(n_step - 1)*tstep + wsize);
+for t = 1:n_step
+    swin((t-1)*tstep+1:(t-1)*tstep + wsize) = swin((t-1)*tstep+1:(t-1)*tstep + wsize) + win2;
+end
+swin = sqrt(swin/wsize);
+fframe = zeros([Nc, n_win+wsize/2-1]);
+for t = 1:n_step
+   fframe(:,1:n_win) = X(:,:,t);
+   fframe(:,n_win+1:end) = conj(X(:,(wsize/2):-1:2,t));
+   frame = ifft(fframe,[],2,'symmetric');
+   wwin = win ./ swin((t-1)*tstep+1:(t-1)*tstep+wsize);
+   wwin = repmat(wwin,Nc,1);
+   x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) = x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) + real(conj(frame).*wwin);
+end
+x = x(:,(wsize-tstep)/2:(wsize-tstep)/2+Nt+1);
+x = x(:,1:Tx);
+
+end
+
