@@ -10,7 +10,7 @@ rng(100)
 
 %% Setup spatial dictionary
 distmat = squareform(distmat);
-B = exp(-(distmat/1).^2);
+B = exp(-(distmat).^2);
 B = nip_blobnorm(B,'norm',2);
 for i = 1 :size(B,2)
     idx_ins = find(B(i,:) < max(B(i,:))*0.001);
@@ -31,7 +31,7 @@ end
 data.x = head_model.L*J;
 
 %% STOUT
-[J_rec,~] = stout(data.x,head_model.L,B,'tstep',4,'wsize',80,'sreg',90,'treg',30,'tol',1e-1);
+[J_rec,~] = stout(data.x,head_model.L,B,'tstep',4,'wsize',80,'sreg',90,'treg',30,'tol',1e-1,'optimres',false);
 
 %% Calculate activity for a given time instant
 J3d = sqrt(sum(J_rec.^2,2));

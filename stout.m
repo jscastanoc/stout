@@ -18,10 +18,11 @@ function [J_rec extras] = stout(y,L,B,varargin)
 %
 % Sebastian Castano-Candamil
 % sebastian.castano@blbt.uni-freiburg.de
-% 14 Aug 2013
+% Apr. 2015
 %
-% Comments:
-% Based on the Implementation ofund in mne-python (include tf-transform)
+% DISCLAIMER:
+% The implementation of the FISTA solver is literal port of the corresponding
+% python implementation found in mne-python (including tf-transform)
 % https://github.com/mne-tools/mne-python
 %
 Ndor = size(L,2);
@@ -99,7 +100,6 @@ stop =false;
 fprintf('Running FISTA algorithm... \n');
 eta = 0;
 rescum = [];
-% temp =  reshape(full(Z)',K,T,[]);
 error = inf;
 res_0 = inf;
 nn = 1;
@@ -109,7 +109,6 @@ while true
     Y = sparse(Nd,K*T);
     J_rec = sparse(Nd,Nt);
     tau = 1;
-    temp =  reshape(full(Z)',K,T,[]);
     active_set = logical(sparse(1,Nd));
     Y_time_as = [];
     Y_as = [];
@@ -117,13 +116,23 @@ while true
         tic;
         Z_0 = Z;
         active_set0 = active_set;
-        %temp = dgtreal(R','gauss',a,M);
-        temp = stft(R,M,a);
-        %temp = permute(temp,[3 1 2]);
-        temp = reshape(temp,Nc,[]);
-        
-        Y = Y + L'*temp/lipschitz_k;
-        [Z, active_set_l1] = prox_l1(Y,lambda_lc,3);
+        if ~isempty(Y_time_as) && sum(active_set)<Nc
+            GTR = L'*R/lipschitz_k;
+            A = GTR;
+            A(Y_as,:) = A(Y_as,:) + Y_time_as;
+            [~, active_set_l21] = prox_l21(A,mu_lc,3);
+                temp = stft(GTR(find(active_set_l21),:),M,a);
+                temp = reshape(temp,sum(active_set_l21),[]);
+                Baux = Y(find(active_set_l21),:)+temp;
+                [Z, active_set_l1] = prox_l1(Baux,lambda_lc,3);
+                active_set_l21(find(active_set_l21))= active_set_l1;
+                active_set_l1 = active_set_l21;            
+        else
+            temp = stft(R,M,a);
+            temp = reshape(temp,Nc,[]);
+            Y = Y + L'*temp/lipschitz_k;
+            [Z, active_set_l1] = prox_l1(Y,lambda_lc,3);
+        end
         [Z, active_set_l21] = prox_l21(Z,mu_lc,3);
         active_set = active_set_l1;
         active_set(find(active_set_l1)) = active_set_l21;
@@ -145,19 +154,15 @@ while true
             Y(find(active_set),:) = (1 + dt)*Z;
             Y(find(active_set0),:)= Y(find(active_set0),:) - dt*Z_0;
             Y_as = active_set0 | active_set;
-            %temp = full(Y(find(Y_as),:));
-            %temp =  reshape(temp',K,T,[]);
-            %             temp = flipdim(temp,2);
-            %             temp = flipud(istft(temp,M,a));
+            
             act_Y_as = find(Y_as);
+            
             temp = reshape(full(Y(act_Y_as,:)), length(act_Y_as),K,T);
-            temp = istft(temp,a,Nt);
+            Y_time_as = istft(temp,a,Nt);
             if isempty(Y_time_as)
                 R = y;
             else
-                Y_time_as = sparse(Nd,size(temp,2));
-                Y_time_as(find(Y_as),:) = temp;
-                R = y - L(:, find(Y_as))*Y_time_as(find(Y_as),1:Nt);
+                R = y - L(:, act_Y_as)*Y_time_as(:,1:Nt);
             end
         else
             disp('')
@@ -171,9 +176,6 @@ while true
     end
     fprintf(' Done!... \nTransforming solution to the time domain: \n%d non-zero time series \n'...
         , sum(full(active_set)))
-    %temp =  reshape(full(Z)',K,T,[]);
-    %     temp = flipdim(temp,2);
-    %     temp = flipud(istft(temp,a,Nt));
     temp = reshape(full(Z),[],K,T);
     temp = istft(temp,a,Nt);
     
@@ -194,12 +196,11 @@ while true
     fprintf('RESNORM = %8.3e MAX:%1.3e\n',resnorm,avg_res);
     Jf_0 = Jf;
     J_rec = Jf;
-    if (nn >= options.maxiter || resnorm < avg_res ...
-            || ~options.optimres)
+    if (nn >= options.maxiter) || ((resnorm < avg_res) && (options.optimres)) || ((sum(active_set) > 0) && ( ~options.optimres))
         break;
     else
-        mu_lc = 0.8*mu_lc;
-        lambda_lc = 0.8*lambda_lc;
+        mu_lc = 0.6*mu_lc;
+        lambda_lc = 0.6*lambda_lc;
     end
     nn = nn+1;
 end
@@ -310,8 +311,9 @@ for i = 1:10
         J_rec = translf(J_rec)';
     end
     J_rec = J_rec*norm(y(idx_te,:),2)/norm(L(idx_te,:)*J_rec,2);
-    avg_res = avg_res + norm(y(idx_te,:)-L(idx_te,:)*J_rec,'fro');
+    avg_res = avg_res + norm(y(idx_te,:)-L(idx_te,:)*J_rec,'fro')/10;
 end
+    avg_res = avg_res*(1/0.75); % Relax convergence criteria (require only 75% of variance explained by MNE)
 end
 
 function gcv_val = gcv(y,L,alpha, inv_Lap, iLAP_LT, eye_Nc)
@@ -322,8 +324,6 @@ gcv_val = sum(diag(A*A'))/trace((eye_Nc-L*T))^2;
 end
 
 function [ X] = stft(x, wsize, tstep)
-%UNTITLED Summary of this function goes here
-%   Detailed explanation goes here
 if isempty(x)
     X = [];
     return
@@ -383,12 +383,12 @@ end
 swin = sqrt(swin/wsize);
 fframe = zeros([Nc, n_win+wsize/2-1]);
 for t = 1:n_step
-   fframe(:,1:n_win) = X(:,:,t);
-   fframe(:,n_win+1:end) = conj(X(:,(wsize/2):-1:2,t));
-   frame = ifft(fframe,[],2,'symmetric');
-   wwin = win ./ swin((t-1)*tstep+1:(t-1)*tstep+wsize);
-   wwin = repmat(wwin,Nc,1);
-   x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) = x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) + real(conj(frame).*wwin);
+    fframe(:,1:n_win) = X(:,:,t);
+    fframe(:,n_win+1:end) = conj(X(:,(wsize/2):-1:2,t));
+    frame = ifft(fframe,[],2,'symmetric');
+    wwin = win ./ swin((t-1)*tstep+1:(t-1)*tstep+wsize);
+    wwin = repmat(wwin,Nc,1);
+    x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) = x(:,(t-1)*tstep+1:(t-1)*tstep+wsize) + real(conj(frame).*wwin);
 end
 x = x(:,(wsize-tstep)/2:(wsize-tstep)/2+Nt+1);
 x = x(:,1:Tx);
